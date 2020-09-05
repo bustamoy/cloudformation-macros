@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+  Macro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Description: |
+        Finds HostedZoneId for the specified HostedZoneName and CertificateArn for the specified DomainName.
+        Places their values into a Ref: or !Ref for CertLookupMacro::HostedZoneId / CertLookupMacro::CertificateArn
+      FunctionName: !GetAtt CertLookupMacroFunction.Arn
+  
+  CertLookupMacroFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: CertLookupMacroFunction
+      Handler: index.handler
+      Role: !GetAtt CertLookupMacroFunctionRole.Arn
+      Runtime: nodejs12.x
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const HOSTEDZONEIDTOKEN = "CertLookupMacro::HostedZoneId";
+          const CERTIFICATEARNTOKEN = "CertLookupMacro::CertificateArn";
+
+          exports.handler = async(event) => {
+            let tempFragment = event.fragment;
+            let result = { requestId: event.requestId, status: 'failure', fragment: tempFragment };
+
+            // Check for required information
+            if (!(tempFragment && tempFragment.Metadata && tempFragment.Metadata.CertLookupMacroConfig)) {
+                result.errorMessage = 'Template is missing required information: Metadata.CertLookupMacroConfig';
+                return result;
+            }
+
+            const macroConfig = tempFragment.Metadata.CertLookupMacroConfig;
+            const hostedZoneName = macroConfig.HostedZoneName;
+            let hostedZoneId = macroConfig.HostedZoneId;
+            if (!hostedZoneId) {
+                if (!hostedZoneName) {
+                    result.errorMessage = 'Template is missing required information: Metadata.CertLookupMacroConfig.HostedZoneName';
+                    return result;
+                }
+                const hostedZoneData = await new AWS.Route53().listHostedZonesByName({ DNSName: hostedZoneName, MaxItems: '1' }).promise();
+                if (hostedZoneData && hostedZoneData.HostedZones && hostedZoneData.HostedZones.length == 1 && !hostedZoneData.IsTruncated && hostedZoneName == hostedZoneData.HostedZones[0].Name && hostedZoneData.HostedZones[0].Id) {
+                    hostedZoneId = hostedZoneData.HostedZones[0].Id.split('/').slice(-1).pop();
+                } else {
+                    result.errorMessage = `HostedZone Not Found: ${hostedZoneName}`;
+                    return result;
+                }
+            }
+
+            const domainName = macroConfig.DomainName;
+            let certificateArn = "";
+            const certificatesData = await new AWS.ACM({ region: event.region }).listCertificates({ CertificateStatuses: ['ISSUED'] }).promise();
+            if (certificatesData && certificatesData.CertificateSummaryList && certificatesData.CertificateSummaryList.length > 0) {
+                const certificates = certificatesData.CertificateSummaryList.filter((e) => domainName == e.DomainName);
+                if (certificates.length == 1) {
+                    certificateArn = certificates.pop().CertificateArn;
+                } else if (certificates.length > 1) {
+                    result.errorMessage = `Multiple certificates found for ${domainName}`;
+                    return result;
+                }
+            }
+
+            tempFragment.Conditions = tempFragment.Conditions || {};
+            tempFragment.Conditions.CreateCertificate = { "Fn::Equals": [certificateArn, ""] };
+
+            result.status = "success";
+            result.fragment = JSON.parse(JSON.stringify(tempFragment).replace(new RegExp(HOSTEDZONEIDTOKEN, 'g'), hostedZoneId).replace(new RegExp(CERTIFICATEARNTOKEN, 'g'), certificateArn));
+            return result;
+          };
+
+  # # LambdaFunctionPermission:
+  # #   Type: AWS::Lambda::Permission
+  # #   Properties:
+  # #     Action: 
+  # #     FunctionName: 
+  # #     Principal: 
+  
+  CertLookupMacroFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CertLookupMacroFunctionRole
+      AssumeRolePolicyDocument: {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Action": [
+              "sts:AssumeRole"
+            ],
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [
+                "lambda.amazonaws.com"
+              ]
+            }
+          }
+        ]
+      }
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/AWSCertificateManagerReadOnly"
+        - "arn:aws:iam::aws:policy/AmazonRoute53ReadOnlyAccess" 
+      # Policies:
+      #   - PolicyDocument: {
+      #       "Version": "2012-10-17",
+      #       "Statement": [
+      #           {
+      #               "Effect": "Allow",
+      #               "Action": "logs:CreateLogGroup",
+      #               "Resource": "arn:aws:logs:us-east-1:858305177102:*"
+      #           },
+      #           {
+      #               "Effect": "Allow",
+      #               "Action": [
+      #                   "logs:CreateLogStream",
+      #                   "logs:PutLogEvents"
+      #               ],
+      #               "Resource": [
+      #                   "arn:aws:logs:us-east-1:858305177102:log-group:/aws/lambda/CertLookupMacroFunction:*"
+      #               ]
+      #           }
+      #         ]
+      #     }
+      #     PolicyName: AWSLambdaBasicExecutionRole-LambdaFunctionRole
+  CertLookupMacroFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub "/aws/lambda/${CertLookupMacroFunction}"
+      RetentionInDays: 1

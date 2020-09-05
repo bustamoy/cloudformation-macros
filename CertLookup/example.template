@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform:
+  - CertLookupMacro
+  - AWS::Serverless-2016-10-31
+Description: This stack is for the example-project application
+
+# Globals:
+# Make sure to add the --tags option to deploy or 
+# add tags = "Project=example-project" to the samconfig.toml file
+
+Metadata:
+  CertLookupMacroConfig:
+    HostedZoneName: daisypupsoftware.com. 
+    DomainName: api.ex.daisypupsoftware.com 
+
+# CONSTANTS
+Mappings:
+  Constants:
+    ValueOf:
+      ApiDomainName: api.ex.daisypupsoftware.com
+
+Parameters: 
+  ProjectTagParameter: 
+    Type: String
+    Default: example-project
+    Description: "Project: tag to associate with these resources"
+
+Resources:
+  ExampleProjectHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - http://ex.daisypupsoftware.com
+          - https://ex.daisypupsoftware.com
+        AllowHeaders:
+          - '*'
+        AllowMethods:
+          - POST
+        MaxAge: 600
+        AllowCredentials: False
+      Domain:
+        CertificateArn: !If [CreateCertificate, !Ref ExampleProjectCert, CertLookupMacro::CertificateArn]
+        DomainName: !FindInMap [ Constants, ValueOf, ApiDomainName ]
+      StageName: prod
+      Tags:
+        Project: !Ref ProjectTagParameter
+
+  ExampleProjectCert:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateCertificate
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Delete
+    Properties: 
+      DomainName: !FindInMap [ Constants, ValueOf, ApiDomainName ]
+      ValidationMethod: DNS
+      DomainValidationOptions: 
+        - DomainName: !FindInMap [ Constants, ValueOf, ApiDomainName ]
+          HostedZoneId: CertLookupMacro::HostedZoneId
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTagParameter
+
+  ExampleProjectRecordSetGroup:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      Comment: Added by example-project template
+      HostedZoneId: CertLookupMacro::HostedZoneId
+      RecordSets:
+        - Name: !FindInMap [ Constants, ValueOf, ApiDomainName ]
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt ExampleProjectHttpApi.DomainName.RegionalDomainName
+            HostedZoneId: !GetAtt ExampleProjectHttpApi.DomainName.RegionalHostedZoneId
+            EvaluateTargetHealth: false
+          SetIdentifier: !Sub "${AWS::Region}-api"
+          Weight: 1
+
+# Outputs:
+#   ExampleProjectCertArn:
+#     Description: 'ARN: Certificate for furry broccoli app (regional base and api)'
+#     Value: !Ref ExampleProjectCert
+#     Export:
+#       Name: ExampleProjectCertArnExport
